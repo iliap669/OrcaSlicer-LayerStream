@@ -21265,6 +21265,20 @@ void Plater::replace_with_stl()
     p->replace_with_stl();
 }
 
+bool Plater::layerstream_replace_volume(int object_idx, int volume_idx, const std::string& path)
+{
+    if (object_idx < 0 || object_idx >= int(p->model.objects.size()) || volume_idx < 0 ||
+        volume_idx >= int(p->model.objects[object_idx]->volumes.size()))
+        return false;
+    if (!p->replace_volume_with_stl(object_idx, volume_idx, fs::path(path), _u8L("Replace with revised model")))
+        return false;
+    p->update();
+    for (size_t i = 0; i < p->model.objects.size(); ++i)
+        p->view3D->get_canvas3d()->update_instance_printable_state_for_object(i);
+    changed_object(object_idx);
+    return true;
+}
+
 void Plater::replace_all_with_stl()
 {
     p->replace_all_with_stl();

@@ -610,6 +610,8 @@ public:
     void reload_from_disk();
     void replace_with_stl();
     void replace_all_with_stl();
+    // LayerStream: replaces one part with a revised model file in place, keeping its transformation (see LayerStreamDialog).
+    bool layerstream_replace_volume(int object_idx, int volume_idx, const std::string& path);
     void reload_all_from_disk();
     bool has_toolpaths_to_export() const;
     void export_toolpaths_to_obj() const;

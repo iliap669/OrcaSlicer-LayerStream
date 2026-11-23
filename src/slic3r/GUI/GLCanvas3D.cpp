@@ -67,6 +67,7 @@
 #include <string_view>
 #include "slic3r/GUI/Selection.hpp"
 #include "GLCanvas3D.hpp"
+#include "LayerStreamDialog.hpp"
 #include "SequentialPrintClearance.hpp"
 #ifdef SLIC3R_CAD
 #include "slic3r/GUI/CAD/DesignSketchTool.hpp"   // Design tab: interactive 2D sketch tool
@@ -3495,6 +3496,9 @@ void GLCanvas3D::_render_scene(const Camera& camera, const Size& cnv_size)
         // BBS: GUI refactor: add canvas size as parameters
         _render_gcode(cnv_size.get_width(), cnv_size.get_height());
         m_frame_profiler.mark("gcode");
+        // LayerStream: band + highlight at the first layer a revised model changes
+        if (LayerStreamOverlay::get().active())
+            LayerStreamOverlay::get().render();
     }
     /* assemble render*/
     else if (m_canvas_type == ECanvasType::CanvasAssembleView) {
