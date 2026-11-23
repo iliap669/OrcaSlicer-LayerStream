@@ -95,7 +95,9 @@ void LayerStreamOverlay::render()
             const Vec2d  min    = m_footprint.defined ? m_footprint.min - Vec2d(margin, margin) : Vec2d(0., 0.);
             const Vec2d  max    = m_footprint.defined ? m_footprint.max + Vec2d(margin, margin) : Vec2d(10., 10.);
             indexed_triangle_set band = its_make_cube(max.x() - min.x(), max.y() - min.y(), m_height);
-            its_translate(band, Vec3f(float(min.x()), float(min.y()), float(m_z - m_height)));
+            const Vec3f shift(float(min.x()), float(min.y()), float(m_z - m_height));
+            for (stl_vertex& v : band.vertices)
+                v += shift;
             m_band.init_from(band);
             m_band.set_color(ColorRGBA(1.0f, 0.55f, 0.0f, 0.25f));
 
