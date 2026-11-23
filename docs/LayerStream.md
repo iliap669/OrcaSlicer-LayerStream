@@ -29,23 +29,38 @@ Open it from **File > Revise running print (LayerStream)…**.
 The printer's connection must be set to *Creality Print* with its IP address (Printer settings > Connection), the same setting that
 *Send to printer* uses.
 
-1. Read the status over the WebSocket. The job must be printing, and the reported toolhead Z must be below the first changed layer.
-2. Wait for the next layer change, which is detected from `curPosition` Z when the same new layer is seen twice in a row, so that a Z
-   hop is not mistaken for one. The tail restarts at the layer that has just begun, so only a few seconds of that layer get printed
-   twice.
-3. `pause` and wait for paused. Then `stop` and wait until the job is no longer busy. The stock firmware cannot load another file
-   while a job is loaded, and it has no way to inject G-code into the running job.
-4. Build the tail from the revised G-code: cut from the restart layer's `;LAYER_CHANGE` to the end, and put a resume preamble in front:
-   - `M140`/`M104`, then `SET_KINEMATIC_POSITION X Y Z` set to the position reported after the stop. This is optional and needs
-     Klipper's `force_move`, because the stop may disable the steppers.
-   - A Z lift to clear the part, then an optional `G28 X Y`. Z is never homed.
-   - `M190`/`M109`, then `BED_MESH_PROFILE LOAD=default`, and never a re-probe.
+1. Read the status over the WebSocket. The job must be printing. The layer being printed comes from the firmware's `layer` counter,
+   mapped to a G-code layer by counting the same marker lines the firmware counts (`LAYER_KEYS` in Creality's
+   `klippy/extras/virtual_sdcard.py`: `;LAYER:`, `; layer:`, `; LAYER:`, `;AFTER_LAYER_CHANGE`, `;LAYER_CHANGE`) in the G-code the printer
+   runs. The toolhead Z is only logged: on the KE profile the z-hop (0.2 mm) equals the layer height, so Z cannot tell layer n + hop
+   from layer n + 1, and the pause macro lifts Z.
+2. Wait for the counter to advance and pause at once, so the pause lands early in a layer.
+3. Wait for paused, then read the counter again. The layer it names is the resume layer. It restarts from its beginning, so the few
+   seconds of it printed before the pause are printed over. If that layer is past the changed layer, nothing more is sent.
+4. Build the tail from the revised G-code: cut from the resume layer's `;LAYER_CHANGE` to the end, and put a resume preamble in front:
+   - `M140`/`M104` (the stock `PAUSE` macro drops the nozzle to 140 °C).
+   - `G90`, then an absolute `G1 Z<layer + 2>`, which is a move down from the pause park height and is clear of the part.
+     An optional `G28 X Y` (off by default). Z is never homed. No `SET_KINEMATIC_POSITION`, no `G92 X/Y/Z`, no `SET_GCODE_OFFSET`:
+     the paused job's position, Z offset and bed mesh are kept by the firmware and must stay as they are.
+   - `M190`/`M109`. The active bed mesh is kept (a profile is loaded only if one is typed in the dialog).
    - Replayed `EXCLUDE_OBJECT_DEFINE` lines and the fan speed active at the cut.
    - Travel to above the tail's first XY, lower to the layer Z, and a small prime.
    - Restore the absolute or relative E mode, then `G92 E<value at the cut>` so the tail's absolute E values continue.
-   - `find_forbidden_resume_command` rejects `G28` with Z or bare `G28`, `G29`, `BED_MESH_CALIBRATE`, `PROBE`, `START_PRINT`,
-     `FIRMWARE_RESTART` and similar commands.
-5. Upload the tail over HTTP and start it, which reuses `CrealityPrint::upload` with *StartPrint*.
+   - `find_forbidden_resume_command` rejects, in the preamble and the whole tail, bare `G28` or `G28` with Z, `G29`,
+     `BED_MESH_CALIBRATE`, `PROBE`, `START_PRINT`, `FIRMWARE_RESTART`, `RESTART`, `G92` with X/Y/Z, `SET_GCODE_OFFSET` and similar.
+5. Dry check (`check_tail`): logs the tail's first Z moves and the Z of its first extrusion, which must equal the resume layer Z. The
+   same check runs in the dialog right after the comparison, before *Apply* is offered.
+6. Upload the tail over HTTP without starting it and confirm it is in the printer's file list.
+7. Switch the paused job: console G-code `CLEAR_PAUSE`, then `SDCARD_PRINT_FILE FILENAME=<tail>`. In Creality's Klipper the paused
+   virtual_sdcard has no work timer, so `SDCARD_PRINT_FILE` is accepted. It closes the old file, loads the tail and runs only `G90`
+   before the first line (homing is done only in the power-loss path). Then wait up to 45 s for `printing` with the tail's file name.
+   If that does not happen, LayerStream reports it and stops. The original job is then normally still paused and can be resumed or
+   cancelled on the printer screen.
+
+The job is never stopped. On stock firmware a stop runs `CANCEL_PRINT`, which lifts Z by 2 mm, parks at X0 Y222, turns the heaters off
+and runs `M84`, so the steppers are released and the position is lost. A tail started after that cannot be put back at the right height
+without homing Z, which a part on the bed does not allow. The first real-printer test used stop and then declared the `curPosition`
+reported after the stop with `SET_KINEMATIC_POSITION`, and printed at the wrong height.
 
 ## Stock Creality firmware protocol (as used here)
 
@@ -57,24 +72,25 @@ The printer's connection must be set to *Creality Print* with its IP address (Pr
 | Heartbeat | WebSocket | printer sends `heart_beat`, client answers `ok` |
 | Start file | WebSocket | `{"method":"set","params":{"opGcodeFile":"printprt:<full path>"}}` |
 | Pause / resume | WebSocket | `{"method":"set","params":{"pause":1}}` / `{"pause":0}` |
-| Stop | WebSocket | `{"method":"set","params":{"stop":1}}` |
+| Stop (not used: runs CANCEL_PRINT, M84) | WebSocket | `{"method":"set","params":{"stop":1}}` |
 | Console G-code | WebSocket | `{"method":"set","params":{"gcodeCmd":"<line>"}}` |
 | File list | WebSocket | `{"method":"get","params":{"reqGcodeFile":1}}` → `retGcodeFileInfo` |
 
 Status keys used: `state` (1 printing, 5 paused, 4 stopped, 0 idle), `deviceState` (7 homing), `curPosition` (`"X:.. Y:.. Z:.."`),
-`layer`, `TotalLayer`, `printProgress`, `printFileName`, `nozzleTemp`, `targetNozzleTemp`, `bedTemp0`, `targetBedTemp0`. The layer
-counter of the stock firmware is known to drift, so LayerStream derives the layer from Z.
+`layer`, `TotalLayer`, `printProgress`, `printFileName`, `nozzleTemp`, `targetNozzleTemp`, `bedTemp0`, `targetBedTemp0`. The `layer`
+value is virtual_sdcard's count of layer marker lines read so far. It runs a little ahead of the nozzle because of the motion queue.
 
-The stock firmware has no Moonraker on port 7125. There is no supported way to replace the remaining part of a loaded job, so
-LayerStream has to stop the job and start a new file, which loses the heated and homed state. A rooted printer that runs Moonraker could
-keep the job alive (for example with `SDCARD_PRINT_FILE` while paused), but that is not implemented.
+The stock firmware has no Moonraker on port 7125. There is no documented way to replace the remaining part of a loaded job. LayerStream uses
+the Klipper commands `CLEAR_PAUSE` and `SDCARD_PRINT_FILE` through the console G-code message, which Creality's own web server may or may
+not pass through while a job is paused. A rooted printer with Moonraker gives the same commands through a supported API.
 
 ## Known limits
 
-- Tested with unit tests and CI builds only. The printer sequence has not been run against a real printer yet.
-- What the stock stop does (heaters off, park, steppers off) decides whether `SET_KINEMATIC_POSITION` or `G28 X Y` is needed. Both are
-  options in the dialog.
-- The bed cools a little between the stop and the reheat. Parts with weak bed adhesion may lift.
+- The pause-and-switch sequence follows Creality's published Klipper source and the extracted KE macros. It has not run on a real KE yet,
+  and Creality's closed web server, which handles the WebSocket, may reject `gcodeCmd` while paused.
+- Klipper's idle timeout runs on a paused printer too. The switch takes seconds, but a paused job left for longer than the configured
+  timeout loses its heaters and motors.
+- The part of the resume layer printed before the pause is printed again.
 - Only single-part objects can be revised, which is the same restriction as *Replace with 3D file*.
 - Support or transition geometry under newly overhanging areas is generated by the normal slicer settings for the new layers. There is
   no dedicated chamfer yet.

@@ -4,8 +4,10 @@
 // families, over the same port 9999 WebSocket that OrcaSlicer's CrealityPrint host uses to start prints.
 //
 // The stock firmware exposes no Moonraker API and no way to feed G-code into a running job: a job is a file that the printer reads
-// from its own storage. So a mid-print revision is applied as: pause the job, stop it, upload a "tail" file that holds the G-code
-// of the remaining layers behind a resume preamble, and start that file. See docs/LayerStream.md.
+// from its own storage. So a mid-print revision is applied as: pause the job (which keeps the axes homed and the Z offset and bed
+// mesh active), upload a "tail" file that holds the G-code of the remaining layers behind a resume preamble, and switch the paused
+// virtual_sdcard to that file with CLEAR_PAUSE + SDCARD_PRINT_FILE. The job is never stopped: on stock firmware a stop runs
+// CANCEL_PRINT, which parks the head and disables the steppers (M84), after which the position is unknown. See docs/LayerStream.md.
 
 #include <chrono>
 #include <functional>
@@ -50,6 +52,10 @@ public:
     void stop() const;
     // {"method":"set","params":{"gcodeCmd":"..."}}: one console G-code line (Klipper syntax on stock firmware).
     void gcode(const std::string& line) const;
+
+    // Whether `name` is in the printer's G-code file list ({"method":"get","params":{"reqGcodeFile":1}} -> retGcodeFileInfo).
+    // 1: listed, 0: the list came back without it, -1: no list within the timeout.
+    int file_listed(const std::string& name, std::chrono::milliseconds timeout = std::chrono::milliseconds(12000)) const;
 
     // Polls read_status() until pred is true or the timeout passes. Returns the last status.
     CrealityStatus wait_for(const std::function<bool(const CrealityStatus&)>& pred,

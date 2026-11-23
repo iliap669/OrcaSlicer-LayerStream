@@ -159,6 +159,40 @@ CrealityStatus CrealityWs::read_status(std::chrono::milliseconds listen) const
     return st;
 }
 
+int CrealityWs::file_listed(const std::string& name, std::chrono::milliseconds timeout) const
+{
+    net::io_context ioc;
+    WsStream        ws{ioc};
+    ws_connect(ioc, ws, m_host, m_port, std::chrono::seconds(5));
+    ws_write(ioc, ws, R"({"method":"get","params":{"reqGcodeFile":1}})");
+    int        result   = -1;
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        beast::flat_buffer buf;
+        beast::get_lowest_layer(ws).expires_at(deadline);
+        if (ws_read(ioc, ws, buf))
+            break;
+        const std::string text = beast::buffers_to_string(buf.data());
+        if (text.find("heart_beat") != std::string::npos) {
+            ws_write(ioc, ws, "ok");
+            continue;
+        }
+        if (text.find("retGcodeFileInfo") == std::string::npos)
+            continue;
+        if (text.find(":" + name + ":") != std::string::npos || text.find("/" + name + "\"") != std::string::npos) {
+            result = 1;
+            break;
+        }
+        // Not (yet) listed: a printer can answer before it has indexed a file just uploaded, so ask again.
+        result = 0;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+        ws_write(ioc, ws, R"({"method":"get","params":{"reqGcodeFile":1}})");
+    }
+    beast::error_code ignored;
+    beast::get_lowest_layer(ws).socket().close(ignored);
+    return result;
+}
+
 void CrealityWs::send_set(const std::string& json_params) const
 {
     const json params = json::parse(json_params);

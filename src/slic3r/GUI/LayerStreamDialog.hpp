@@ -68,6 +68,7 @@ private:
     void jump_preview_to_changed_layer();
     void on_apply();
     void on_save_tail();
+    void dry_check_tail();
     void update_buttons();
     LayerStream::ResumeOptions resume_options() const;
 
@@ -76,7 +77,6 @@ private:
     wxButton*   m_btn_choose = nullptr;
     wxButton*   m_btn_apply = nullptr;
     wxButton*   m_btn_save = nullptr;
-    wxCheckBox* m_chk_kinematic = nullptr;
     wxCheckBox* m_chk_rehome_xy = nullptr;
     wxTextCtrl* m_mesh_profile = nullptr;
     wxTimer     m_timer;
