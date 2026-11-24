@@ -230,6 +230,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/SequentialPrintClearance.hpp
     GUI/GLModel.cpp
     GUI/GLModel.hpp
+    GUI/LayerStreamDialog.cpp
+    GUI/LayerStreamDialog.hpp
     GUI/GLSelectionRectangle.cpp
     GUI/GLSelectionRectangle.hpp
     GUI/GLShader.cpp
@@ -768,6 +770,8 @@ set(SLIC3R_GUI_SOURCES
     Utils/CrealityPrintAgent.hpp
     Utils/CrealityHostDiscovery.cpp
     Utils/CrealityHostDiscovery.hpp
+    Utils/LayerStreamCreality.cpp
+    Utils/LayerStreamCreality.hpp
     Utils/Duet.cpp
     Utils/Duet.hpp
     Utils/ElegooLink.cpp

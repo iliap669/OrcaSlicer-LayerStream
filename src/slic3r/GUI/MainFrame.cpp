@@ -162,6 +162,8 @@
 #include <wx/window.h>
 #include <wx/wupdlock.h>
 
+#include "LayerStreamDialog.hpp"
+
 
 using json = nlohmann::json;
 
@@ -3179,6 +3181,12 @@ void MainFrame::init_menubar_as_editor()
             []() { return true; }, this);
 
         append_submenu(fileMenu, export_menu, wxID_ANY, _L("Export"), "");
+
+        // LayerStream: swap the model of a running print from a given layer on
+        append_menu_item(fileMenu, wxID_ANY, _L("Revise running print (LayerStream)") + dots,
+            _L("Replace the not yet printed layers of the running job with layers sliced from a revised model"),
+            [this](wxCommandEvent&) { if (m_plater) show_layerstream_dialog(m_plater); }, "", nullptr,
+            [this]() { return can_export_gcode(); }, this);
 
         fileMenu->AppendSeparator();
 

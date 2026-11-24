@@ -108,6 +108,10 @@ set(lisbslic3r_sources
     ClipperUtils.hpp
     ClipperZUtils.cpp
     ClipperZUtils.hpp
+    LayerStream/LayerStreamDiff.cpp
+    LayerStream/LayerStreamDiff.hpp
+    LayerStream/LayerStreamGCode.cpp
+    LayerStream/LayerStreamGCode.hpp
     Color.cpp
     Color.hpp
     CommonDefs.hpp
