@@ -277,9 +277,15 @@ void run_apply(std::shared_ptr<LayerStreamDialog::ApplyJob> job, DynamicPrintCon
         if (st.layer < 1)
             return fail("The printer does not report its layer counter, so the printed layer is unknown. Nothing was sent.");
         int current = to_revised(layer_for_firmware_counter(counter_map, st.layer));
-        if (current < 0)
+        if (current < 0) {
+            if (st.layer > int(counter_map.size()))
+                return fail("Firmware layer " + std::to_string(st.layer) + " is past the last layer (" + std::to_string(counter_map.size()) +
+                            ") of the G-code this revision was compared with. If an earlier LayerStream switch is running, the plate now "
+                            "holds that revised model: choose the next revised model again so it is compared with the running one. "
+                            "Nothing was sent.");
             return fail("Firmware layer " + std::to_string(st.layer) + " does not map to a layer of this G-code. Is the printer running "
                         "the G-code of this plate? Nothing was sent.");
+        }
         if (st.have_position)
             job->log("Firmware layer " + std::to_string(st.layer) + " = G-code layer " + std::to_string(current + 1) + " at Z " +
                      fmt_mm(layers[current].z) + " (toolhead reports Z " + fmt_mm(st.z) + "; it differs during z-hops and by the Z offset).");
@@ -332,9 +338,19 @@ void run_apply(std::shared_ptr<LayerStreamDialog::ApplyJob> job, DynamicPrintCon
                  " (it restarts from its beginning; the part of it printed before the pause is printed over).");
 
         opts.set_kinematic_position = false; // the frame is intact: never redeclare it
+        // SDCARD_PRINT_FILE keeps the firmware's layer counter; the tail disables the marks it already counted, so the screen keeps the
+        // revised G-code's numbering.
+        opts.firmware_layer_counter = st.layer;
+        const CrealityStatus paused_status = st;
         const TailResult tail = build_tail(gcode, layers[resume_idx].z, opts);
         if (!tail.ok)
             return fail("Cannot build the tail G-code: " + tail.error);
+        const int revised_marks = count_firmware_layer_marks(gcode);
+        job->log("Firmware layer counter: " + std::to_string(st.layer) + " now; the tail disables " + std::to_string(tail.disabled_markers) +
+                 " already counted mark(s) and has " + std::to_string(tail.counted_markers) + ", so the counter should end at " +
+                 std::to_string(st.layer + tail.counted_markers) + " (the revised G-code has " + std::to_string(revised_marks) + ").");
+        if (st.layer + tail.counted_markers != revised_marks)
+            job->log("Warning: the firmware layer numbering will not match the revised G-code's; the print itself is not affected.");
         const TailCheck check = check_tail(tail.gcode, tail.layer_z);
         job->log("Dry check of the tail (Z moves in the paused job's frame):");
         for (const std::string& l : check.z_moves)
@@ -367,27 +383,49 @@ void run_apply(std::shared_ptr<LayerStreamDialog::ApplyJob> job, DynamicPrintCon
             return fail(listed == 0 ? "The uploaded tail is not in the printer's file list" : "Could not read the printer's file list to confirm the upload");
 
         // Switch the paused virtual_sdcard to the tail. SDCARD_PRINT_FILE is accepted because the pause stopped the file reader; it
-        // runs only "G90" before the first line of the new file (no homing). CLEAR_PAUSE drops the paused flag of the old job.
+        // runs only "G90" before the first line of the new file (no homing). CLEAR_PAUSE (dropping the old job's paused flag) is sent
+        // only once the tail runs, so a refused switch leaves the original job resumable from the screen.
         st = ws.read_status(std::chrono::milliseconds(1500));
         if (!st.paused())
             return fail("The printer is no longer paused (" + status_line(st) + "); not switching files.");
-        job->log("Switching the paused job to " + tail_name + " (CLEAR_PAUSE, SDCARD_PRINT_FILE)...");
-        paused_by_us = false; // from here the original job may already be unloaded
-        ws.gcode("CLEAR_PAUSE");
+        job->log("Switching the paused job to " + tail_name + " (SDCARD_PRINT_FILE)...");
         ws.gcode("SDCARD_PRINT_FILE FILENAME=" + tail_name);
-        st = ws.wait_for([&](const CrealityStatus& x) { return x.printing() && x.file_name.find(tail_name) != std::string::npos; },
-                         std::chrono::seconds(45));
+
+        // printFileName is not updated by SDCARD_PRINT_FILE on stock firmware (it kept the original name in the second KE test), so
+        // the switch is recognised from other signs: the job prints again after our pause, and its layer total or progress changed.
+        std::string how;
+        auto switched = [&](const CrealityStatus& x) {
+            if (!x.printing())
+                return false;
+            if (x.file_name.find(tail_name) != std::string::npos)
+                how = "file name";
+            else if (x.total_layers > 0 && paused_status.total_layers > 0 && x.total_layers != paused_status.total_layers)
+                how = "layer total " + std::to_string(paused_status.total_layers) + " -> " + std::to_string(x.total_layers);
+            else if (x.progress >= 0 && paused_status.progress > 0 && x.progress < paused_status.progress)
+                how = "progress " + std::to_string(paused_status.progress) + " -> " + std::to_string(x.progress);
+            else
+                how = "printing again after the pause (no other sign)";
+            return true;
+        };
+        st = ws.wait_for(switched, std::chrono::seconds(45));
         job->log("After switch: " + status_line(st));
-        if (!(st.printing() && st.file_name.find(tail_name) != std::string::npos)) {
-            job->log("ERROR: The printer did not start the tail within 45 s. Look at the printer screen: if it still shows the original "
-                     "job as paused, the firmware refused the switch and you can resume or cancel that job there. If it shows an error, "
-                     "cancel the job; do not start the tail from the screen by hand without checking the Z first.");
-            job->success  = false;
-            job->finished = true;
-            return;
+        if (!st.printing()) {
+            paused_by_us = st.paused();
+            return fail("The printer did not start the tail within 45 s (" + status_line(st) + ").");
         }
-        job->log("The printer runs the tail: it reheats, lowers to Z " + fmt_mm(tail.layer_z + std::max(opts.z_hop_mm, 0.5)) +
-                 ", travels to the seam and continues at layer " + std::to_string(resume_idx + 1) + " (Z " + fmt_mm(tail.layer_z) + ").");
+        paused_by_us = false;
+        try {
+            ws.gcode("CLEAR_PAUSE");
+        } catch (const std::exception& e) {
+            job->log("Warning: CLEAR_PAUSE was not sent (" + std::string(e.what()) + "). Pausing from the screen may say it is already paused.");
+        }
+        job->log("The printer runs the tail (recognised by " + how + "). printFileName still shows the original file on stock firmware.");
+        if (st.layer >= 0 && st.layer < paused_status.layer)
+            job->log("Note: the firmware reset its layer counter on the switch; the layer numbers on the screen count from the tail's start.");
+        job->log("It reheats, moves to Z " + fmt_mm(tail.layer_z + std::max(opts.z_hop_mm, 0.5)) + ", travels to the seam and continues at layer " +
+                 std::to_string(resume_idx + 1) + " (Z " + fmt_mm(tail.layer_z) + "). The screen should count up to layer " +
+                 std::to_string(paused_status.layer + tail.counted_markers) + ".");
+        job->log("The plate now holds the revised model. To revise again, choose the next revised model: it is compared with this one.");
         job->success  = true;
         job->finished = true;
     } catch (const std::exception& e) {
@@ -515,7 +553,7 @@ bool LayerStreamDialog::pick_object()
 void LayerStreamDialog::update_buttons()
 {
     const bool busy = m_stage == Stage::WaitingForSlice || m_stage == Stage::Applying;
-    m_btn_choose->Enable(!busy && m_obj_idx >= 0 && m_stage != Stage::Done);
+    m_btn_choose->Enable(!busy && m_obj_idx >= 0);
     const bool ready = m_stage == Stage::Ready && !m_diff.identical && m_diff.first_changed_layer > 0 &&
                        m_registration.status == Registration::Status::Aligned;
     m_btn_apply->Enable(ready);

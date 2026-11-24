@@ -218,6 +218,26 @@ std::vector<int> firmware_layer_counter_map(const std::string& gcode, const std:
     return map;
 }
 
+namespace {
+bool is_firmware_layer_mark(const std::string& line)
+{
+    for (const std::string& key : creality_layer_keys())
+        if (line.compare(0, key.size(), key) == 0)
+            return true;
+    return false;
+}
+} // namespace
+
+int count_firmware_layer_marks(const std::string& gcode, size_t begin, size_t end)
+{
+    int n = 0;
+    for_each_line(gcode, begin, std::min(end, gcode.size()), [&](const std::string& line, size_t) {
+        n += is_firmware_layer_mark(line) ? 1 : 0;
+        return true;
+    });
+    return n;
+}
+
 int layer_for_firmware_counter(const std::vector<int>& map, int counter)
 {
     if (counter < 1 || counter > int(map.size()))
@@ -398,9 +418,43 @@ TailResult build_tail(const std::string& gcode, double swap_z, const ResumeOptio
         return res;
     }
     res.tail_bytes = gcode.size() - it->offset;
-    res.gcode.reserve(preamble.size() + res.tail_bytes + 64);
+
+    std::string header;
+    if (opts.keep_header) {
+        const size_t start = gcode.find("; HEADER_BLOCK_START");
+        const size_t stop  = gcode.find("; HEADER_BLOCK_END");
+        if (start != std::string::npos && stop != std::string::npos && start < stop && stop < it->offset) {
+            const size_t eol = gcode.find('\n', stop);
+            header = gcode.substr(start, (eol == std::string::npos ? gcode.size() : eol + 1) - start);
+        }
+    }
+
+    // Disable the markers of the resume layer the firmware counted before the pause (at least its ;LAYER_CHANGE).
+    res.markers_before = count_firmware_layer_marks(gcode, 0, it->offset);
+    const size_t next_offset = (it + 1) != layers.end() ? (it + 1)->offset : gcode.size();
+    const int    in_layer    = count_firmware_layer_marks(gcode, it->offset, next_offset);
+    int          to_disable  = opts.firmware_layer_counter >= 0 ? std::clamp(opts.firmware_layer_counter - res.markers_before, 0, in_layer) : 0;
+    std::string  body;
+    body.reserve(res.tail_bytes + 128);
+    for_each_line(gcode, it->offset, gcode.size(), [&](const std::string& line, size_t) {
+        if (to_disable > 0 && is_firmware_layer_mark(line)) {
+            body += ";[LayerStream: counted by the firmware before the pause] " + line + "\n";
+            --to_disable;
+            ++res.disabled_markers;
+        } else {
+            body += line;
+            body += '\n';
+        }
+        return true;
+    });
+    if (!gcode.empty() && gcode.back() != '\n' && !body.empty())
+        body.pop_back();
+    res.counted_markers = count_firmware_layer_marks(body);
+
+    res.gcode.reserve(header.size() + preamble.size() + body.size());
+    res.gcode += header;
     res.gcode += preamble;
-    res.gcode.append(gcode, it->offset, std::string::npos);
+    res.gcode += body;
     res.ok = true;
     return res;
 }
